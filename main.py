@@ -1086,6 +1086,11 @@ def main():
                 if del_net:
                     del net
                     net = None
+                else:
+                    net.eval()
+                    for p in net.parameters():
+                        p.requires_grad = False
+                        p.grad = None
 
                 # Save results
                 results = {
