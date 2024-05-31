@@ -1011,8 +1011,10 @@ def main():
         seed = args.seed  # reset seed so that every setting goes through the same seeds over the different runs
 
         for run_num in range(args.num_runs):
-            depths = [depth*args.size_difference, depth, depth*args.size_difference]
-            widths = [width*args.size_difference, width, width*args.size_difference]
+            dsmall, dlarge = depth, round(depth*args.size_difference)
+            wsmall, wlarge = width, round(width*args.size_difference)
+            depths = [dlarge, dsmall, dlarge]
+            widths = [wlarge, wsmall, wlarge]
             train_froms = ["scratch", "scratch", "pretrained"]
             del_net = [True, False, True]
             losses = ["ce", "ce", args.large_model_loss]
