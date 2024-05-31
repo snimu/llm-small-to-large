@@ -1014,13 +1014,13 @@ def main():
             num_params, num_non_embedding_params, depth, width = change_model_scale(model_scale, depth_small, width_small, num_heads)
             model_scales = [model_scale*args.size_difference, model_scale, model_scale*args.size_difference]
             train_froms = ["scratch", "scratch", "pretrained"]
-            del_net = [True, False, True]
+            del_nets = [True, False, True]
             losses = ["ce", "ce", args.large_model_loss]
             uid = hash((setting_num, run_num))  # so that I can get them as a group during analysis
 
             net = None
 
-            for model_scale, train_from, loss_fn in zip(model_scales, train_froms, losses):
+            for model_scale, train_from, loss_fn, del_net in zip(model_scales, train_froms, losses, del_nets):
                 # Change the model scale; width is rounded to nearest 64, and both are None if scaled by model_scale -> get depth and width here
                 num_params, num_non_embedding_params, depth, width = change_model_scale(model_scale)
                 cumulative_run_num += 1
