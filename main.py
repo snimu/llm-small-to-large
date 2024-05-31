@@ -1007,14 +1007,12 @@ def main():
     global hyp, model_scale
     change_gpu_token_capacity(args.gpu_capacity_scalar)
 
-    for setting_num, (model_scale, depth, width, num_heads, linear_value) in enumerate(settings):
+    for setting_num, (model_scale, depth_small, width_small, num_heads, linear_value) in enumerate(settings):
         seed = args.seed  # reset seed so that every setting goes through the same seeds over the different runs
 
         for run_num in range(args.num_runs):
-            dsmall, dlarge = depth, round(depth*args.size_difference)
-            wsmall, wlarge = width, round(width*args.size_difference)
-            depths = [dlarge, dsmall, dlarge]
-            widths = [wlarge, wsmall, wlarge]
+            num_params, num_non_embedding_params, depth, width = change_model_scale(model_scale, depth_small, width_small, num_heads)
+            model_scales = [model_scale*args.size_difference, model_scale, model_scale*args.size_difference]
             train_froms = ["scratch", "scratch", "pretrained"]
             del_net = [True, False, True]
             losses = ["ce", "ce", args.large_model_loss]
@@ -1022,9 +1020,9 @@ def main():
 
             net = None
 
-            for depth, width, train_from, loss_fn in zip(depths, widths, train_froms, losses):
+            for model_scale, train_from, loss_fn in zip(model_scales, train_froms, losses):
                 # Change the model scale; width is rounded to nearest 64, and both are None if scaled by model_scale -> get depth and width here
-                num_params, num_non_embedding_params, depth, width = change_model_scale(model_scale, depth, width, num_heads)
+                num_params, num_non_embedding_params, depth, width = change_model_scale(model_scale)
                 cumulative_run_num += 1
 
                 # Print some feedback
