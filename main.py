@@ -350,9 +350,41 @@ def get_batch(data_dict, key, batchsize, length, model: SpeedyLangNet | None = N
         targets_model: torch.Tensor = model(inputs)
         mask = targets_model.argmax(dim=-1) == targets
         mask = mask.unsqueeze(-1).expand_as(targets_expanded)
-        targets = torch.where(mask, targets_model, targets_expanded)
+        targets_model = torch.where(mask, targets_model, targets_expanded)
+    else:
+        targets_model = None
 
-    return inputs, targets
+    return inputs, targets, targets_model
+
+
+class CrossEntropyLoss(nn.Module):
+    def __init__(
+            self, 
+            reduction: Literal['mean', 'sum', 'none'] = 'mean', 
+            ignore_index: int = -1, 
+            num_classes: int = 256,
+    ):
+        super().__init__()
+        self.reduction = reduction
+        self.ignore_index = ignore_index
+        self.num_classes = num_classes
+
+
+    def forward(self, outputs: torch.Tensor, targets: torch.Tensor):
+        targets = torch.where(targets == self.ignore_index, torch.zeros_like(targets, dtype=torch.int), targets)
+        x_exp = torch.sum(outputs * F.one_hot(targets, num_classes=self.num_classes).float(), dim=-1).exp()
+        x_sum = outputs.exp().sum(dim=-1, keepdim=True)
+        loss = -torch.log(x_exp / x_sum)
+
+        if self.reduction != 'none':
+            loss = loss[torch.where(targets != self.ignore_index)]
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
 
 
 ##############################
@@ -475,7 +507,7 @@ def eval(net):
     with torch.no_grad():
         # Note: We eval at the maximum sequence length so that we can get an idea of how well the sequence length growing extrapolates out
         for _ in range(num_eval_steps):
-            inputs, targets = get_batch(data, key='eval', batchsize=eval_batchsize, length=hyp['misc']['sequence_length']['max'])
+            inputs, targets, _ = get_batch(data, key='eval', batchsize=eval_batchsize, length=hyp['misc']['sequence_length']['max'])
             outputs = net(inputs)
             val_loss += 1./num_eval_steps * loss_fn(outputs.flatten(0, 1).float(), targets.flatten(0, 1))
             val_acc  += 1./num_eval_steps * (outputs.argmax(-1) == targets).float().mean()
@@ -501,6 +533,8 @@ def train(net: SpeedyLangNet | None = None, **settings):
             project=settings['wandb_project'], 
             config=settings,
         )
+
+    loss_fn = choose_loss_fn(settings['loss_fn_name'])
 
     # Full-run statistics variables
     t_secs        = 0.
@@ -588,11 +622,11 @@ def train(net: SpeedyLangNet | None = None, **settings):
 
     # Main loop. Most of the complexity here is in the dynamic growing scheduler(s).
     while True:
-        inputs, targets = get_batch(data, key='train', batchsize=curr_batchsize, length=curr_length, model=settings['model'])
+        inputs, targets, targets_expanded = get_batch(data, key='train', batchsize=curr_batchsize, length=curr_length, model=settings['model'])
 
         outputs = net(inputs)
 
-        loss = settings["loss_fn"](outputs.flatten(0, 1), targets.flatten(0, 1))
+        loss = loss_fn(outputs.flatten(0, 1), (targets if settings['model'] is None else targets_expanded).flatten(0, 1))
 
         loss.div(discrete_sampled_microbatch_steps).backward()
         tokens_seen += curr_batchsize * curr_length
@@ -904,9 +938,9 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--large_model_loss",
-        type=str, choices=["l1", "l2"], default="l1",
+        type=str, choices=["l1", "l2", "ce-distr"], default="ce-distr",
         help="The loss function for the large model. "
-        "TYPE: str; DEFAULT: 'l1'"
+        "TYPE: str; DEFAULT: 'ce-distr'"
     )
 
     # PARSE ARGS
@@ -985,6 +1019,8 @@ def print_settings(settings: list[tuple], names: list[str] = None):
 def choose_loss_fn(loss: Literal["ce", "l1", "l2"]):
     if loss == "ce":
         return nn.CrossEntropyLoss(reduction='mean', ignore_index=-1)
+    if loss == "ce-distr":
+        return CrossEntropyLoss(reduction='mean', ignore_index=-1, num_classes=hyp['misc']['num_tokens'])
     if loss == "l1":
         return nn.L1Loss(reduction='mean')
     if loss == "l2":
@@ -1022,7 +1058,7 @@ def main():
 
             net = None
 
-            for model_scale, train_from, loss_fn, del_net in zip(model_scales, train_froms, losses, del_nets):
+            for model_scale, train_from, loss_fn_name, del_net in zip(model_scales, train_froms, losses, del_nets):
                 # Change the model scale; width is rounded to nearest 64, and both are None if scaled by model_scale -> get depth and width here
                 num_params, num_non_embedding_params, depth, width = change_model_scale(model_scale)
                 cumulative_run_num += 1
@@ -1039,7 +1075,7 @@ def main():
                     f"\n:::    {num_params=}"
                     f"\n:::    {num_non_embedding_params=}"
                     f"\n:::    {train_from=}"
-                    f"\n:::    {loss_fn=}"
+                    f"\n:::    {loss_fn_name=}"
                 )
                 max_len = max(len(line) for line in title.split("\n"))
                 title = "\n".join([line + " " * (max_len - len(line)) + " :::" for line in title.split("\n")])
@@ -1082,7 +1118,7 @@ def main():
                     max_sequence_length=max_sequence_length,
                     seed=seed,
                     model=net,
-                    loss_fn=choose_loss_fn(loss_fn),
+                    loss_fn_name=loss_fn_name,
                 )
 
                 if del_net:
@@ -1105,7 +1141,7 @@ def main():
                     "num_non_embedding_params": [num_non_embedding_params],
                     "num_heads": [num_heads],
                     "train_from": [train_from],
-                    "loss_fn": [loss_fn],
+                    "loss_fn": [loss_fn_name],
                     "size_difference": [args.size_difference],
                     "linear_value": [linear_value],
                     "seed": [seed],
