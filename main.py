@@ -348,7 +348,9 @@ def get_batch(data_dict, key, batchsize, length, model: SpeedyLangNet | None = N
         # Expand the targets to a batch of one-hot encoded vectors
         targets_expanded = F.one_hot(targets, num_classes=hyp['misc']['num_tokens']).to(dtype=torch.bfloat16, device=hyp['misc']['device'])
         targets_model: torch.Tensor = model(inputs)
-        targets = torch.where(targets_model.argmax(dim=-1) == targets, targets_model, targets_expanded)
+        mask = targets_model.argmax(dim=-1) == targets
+        mask = mask.unsqueeze(-1).expand_as(targets_expanded)
+        targets = torch.where(mask, targets_model, targets_expanded)
 
     return inputs, targets
 
