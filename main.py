@@ -350,7 +350,7 @@ def get_batch(data_dict, key, batchsize, length, model: SpeedyLangNet | None = N
         targets_model: torch.Tensor = model(inputs)
         mask = targets_model.argmax(dim=-1) == targets
         mask = mask.unsqueeze(-1).expand_as(targets_expanded)
-        targets_model = torch.where(mask, targets_model, targets_expanded)
+        targets_model = torch.where(mask, targets_model, targets_expanded).to(dtype=torch.bfloat16, device=hyp['misc']['device'])
     else:
         targets_model = None
 
@@ -365,7 +365,7 @@ class L2CELoss(nn.Module):
 
     def forward(self, output: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         labels_argmax = labels.argmax(dim=-1, keepdim=True)
-        labels_onehot = F.one_hot(labels_argmax.squeeze(), num_classes=labels.shape[-1]).float().squeeze()
+        labels_onehot = F.one_hot(labels_argmax.squeeze(), num_classes=labels.shape[-1]).squeeze().to(dtype=torch.bfloat16)
 
         # TODO: reduction="none", then manually reduce?
         loss = self.ce(output, labels_argmax.squeeze()) * self.l2(output, labels) / self.l2(output, labels_onehot)
@@ -612,6 +612,7 @@ def train(net: SpeedyLangNet | None = None, **settings):
         outputs = net(inputs)
 
         loss = loss_fn(outputs.flatten(0, 1), (targets if settings['model'] is None else targets_expanded).flatten(0, 1))
+        net.to(dtype=torch.bfloat16)  # TODO: figure out where grads are changed from bfloat16 to float, fix there...
 
         loss.div(discrete_sampled_microbatch_steps).backward()
         tokens_seen += curr_batchsize * curr_length
