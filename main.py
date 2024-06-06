@@ -355,36 +355,21 @@ def get_batch(data_dict, key, batchsize, length, model: SpeedyLangNet | None = N
         targets_model = None
 
     return inputs, targets, targets_model
+        
 
-
-class CrossEntropyLoss(nn.Module):
-    def __init__(
-            self, 
-            reduction: Literal['mean', 'sum', 'none'] = 'mean', 
-            ignore_index: int = -1, 
-            num_classes: int = 256,
-    ):
+class L2CELoss(nn.Module):
+    def __init__(self):
         super().__init__()
-        self.reduction = reduction
-        self.ignore_index = ignore_index
-        self.num_classes = num_classes
+        self.ce = nn.CrossEntropyLoss(reduction="mean", ignore_index=-1)
+        self.l2 = nn.MSELoss(reduction="mean")
 
+    def forward(self, output: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        labels_argmax = labels.argmax(dim=-1, keepdim=True)
+        labels_onehot = F.one_hot(labels_argmax.squeeze(), num_classes=labels.shape[-1]).float().squeeze()
 
-    def forward(self, outputs: torch.Tensor, targets: torch.Tensor):
-        targets = torch.where(targets == self.ignore_index, torch.zeros_like(targets, dtype=torch.int), targets)
-        x_exp = torch.sum(outputs * F.one_hot(targets, num_classes=self.num_classes).float(), dim=-1).exp()
-        x_sum = outputs.exp().sum(dim=-1, keepdim=True)
-        loss = -torch.log(x_exp / x_sum)
-
-        if self.reduction != 'none':
-            loss = loss[torch.where(targets != self.ignore_index)]
-
-        if self.reduction == 'mean':
-            return loss.mean()
-        elif self.reduction == 'sum':
-            return loss.sum()
-        else:
-            return loss
+        # TODO: reduction="none", then manually reduce?
+        loss = self.ce(output, labels_argmax.squeeze()) * self.l2(output, labels) / self.l2(output, labels_onehot)
+        return loss
 
 
 ##############################
@@ -938,9 +923,9 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--large_model_loss",
-        type=str, choices=["l1", "l2", "ce-distr"], default="ce-distr",
+        type=str, choices=["l1", "l2", "l2ce"], default="l2ce",
         help="The loss function for the large model. "
-        "TYPE: str; DEFAULT: 'ce-distr'"
+        "TYPE: str; DEFAULT: 'l2ce'"
     )
 
     # PARSE ARGS
@@ -1016,11 +1001,11 @@ def print_settings(settings: list[tuple], names: list[str] = None):
         print(f"Setting {i+1}/{len(settings)}:\n{named_settings}\n\n")
 
 
-def choose_loss_fn(loss: Literal["ce", "l1", "l2"]):
+def choose_loss_fn(loss: Literal["ce", "l1", "l2", "l2ce"]):
     if loss == "ce":
         return nn.CrossEntropyLoss(reduction='mean', ignore_index=-1)
-    if loss == "ce-distr":
-        return CrossEntropyLoss(reduction='mean', ignore_index=-1, num_classes=hyp['misc']['num_tokens'])
+    if loss == "l2cd":
+        return L2CELoss()
     if loss == "l1":
         return nn.L1Loss(reduction='mean')
     if loss == "l2":
