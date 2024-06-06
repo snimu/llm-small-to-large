@@ -1004,7 +1004,7 @@ def print_settings(settings: list[tuple], names: list[str] = None):
 def choose_loss_fn(loss: Literal["ce", "l1", "l2", "l2ce"]):
     if loss == "ce":
         return nn.CrossEntropyLoss(reduction='mean', ignore_index=-1)
-    if loss == "l2cd":
+    if loss == "l2ce":
         return L2CELoss()
     if loss == "l1":
         return nn.L1Loss(reduction='mean')
