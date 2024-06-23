@@ -355,21 +355,23 @@ def get_batch(data_dict, key, batchsize, length, model: SpeedyLangNet | None = N
         targets_model = None
 
     return inputs, targets, targets_model
-        
 
-class L2CELoss(nn.Module):
-    def __init__(self):
+    
+class MultiCrossEntropyLoss(nn.Module):
+    def __init__(self, top_k: int = 5, eps: float = 1e-5):
         super().__init__()
-        self.ce = nn.CrossEntropyLoss(reduction="mean", ignore_index=-1)
-        self.l2 = nn.MSELoss(reduction="mean")
-
+        self.ce = nn.CrossEntropyLoss(reduction="none", ignore_index=-1)
+        self.eps = eps
+        self.top_k = top_k
+    
     def forward(self, output: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        labels_argmax = labels.argmax(dim=-1, keepdim=True)
-        labels_onehot = F.one_hot(labels_argmax.squeeze(), num_classes=labels.shape[-1]).squeeze().to(dtype=torch.bfloat16)
-
-        # TODO: reduction="none", then manually reduce?
-        loss = self.ce(output, labels_argmax.squeeze()) * self.l2(output, labels) / self.l2(output, labels_onehot)
-        return loss
+        indices = labels.argsort(dim=-1, descending=True)[:, :self.top_k]
+        weights = labels.gather(-1, indices)
+        weights = weights / (weights.sum(dim=-1, keepdim=True) + self.eps)
+        loss = 0.
+        for i in range(self.top_k):
+            loss += torch.mean(self.ce(output, indices[:, i]) * weights[:, i])
+        return loss.sum()
 
 
 ##############################
@@ -519,7 +521,7 @@ def train(net: SpeedyLangNet | None = None, **settings):
             config=settings,
         )
 
-    loss_fn = choose_loss_fn(settings['loss_fn_name'])
+    loss_fn = choose_loss_fn(settings['loss_fn_name'], settings['top_k'])
 
     # Full-run statistics variables
     t_secs        = 0.
@@ -924,9 +926,16 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--large_model_loss",
-        type=str, choices=["l1", "l2", "l2ce"], default="l2ce",
+        type=str, choices=["l1", "l2", "mce"], default="mce",
         help="The loss function for the large model. "
-        "TYPE: str; DEFAULT: 'l2ce'"
+        "TYPE: str; DEFAULT: 'mce'"
+    )
+    parser.add_argument(
+        "--top_k",
+        type=int, default=1, nargs="+",
+        help="The top-k value for the MultiCrossEntropyLoss. "
+        "Ignored for any other loss value. "
+        "TYPE: int; DEFAULT: 1"
     )
 
     # PARSE ARGS
@@ -938,6 +947,7 @@ def get_args() -> argparse.Namespace:
     args.depth = [None if d < 1 else d for d in args.depth]
     args.width = [None if w < 1 else w for w in args.width]
     args.num_heads = [args.num_heads] if isinstance(args.num_heads, int) else args.num_heads
+    args.top_k = [args.top_k] if isinstance(args.top_k, int) else args.top_k
 
     args.model_scale = [args.model_scale] if isinstance(args.model_scale, float) else args.model_scale
     args.linear_value = [args.linear_value] if isinstance(args.linear_value, int) else args.linear_value
@@ -974,12 +984,12 @@ def get_settings(args: argparse.Namespace) -> list:
     # and you can handle that here.
 
     settings =  list(itertools.product(
-        args.model_scale, args.depth, args.width, args.num_heads, args.linear_value
+        args.model_scale, args.depth, args.width, args.num_heads, args.linear_value, args.top_k
     ))
 
     settings = [
-        (model_scale, depth, width, num_heads, linear_value) 
-        for model_scale, depth, width, num_heads, linear_value in settings 
+        (model_scale, depth, width, num_heads, linear_value, top_k) 
+        for model_scale, depth, width, num_heads, linear_value, top_k in settings 
         if not setting_violates_rules(
             model_scale=model_scale, 
             depth=depth, 
@@ -1002,11 +1012,11 @@ def print_settings(settings: list[tuple], names: list[str] = None):
         print(f"Setting {i+1}/{len(settings)}:\n{named_settings}\n\n")
 
 
-def choose_loss_fn(loss: Literal["ce", "l1", "l2", "l2ce"]):
+def choose_loss_fn(loss: Literal["ce", "l1", "l2", "mce"], top_k: int = 1):
     if loss == "ce":
         return nn.CrossEntropyLoss(reduction='mean', ignore_index=-1)
-    if loss == "l2ce":
-        return L2CELoss()
+    if loss == "mce":
+        return MultiCrossEntropyLoss(top_k=top_k)
     if loss == "l1":
         return nn.L1Loss(reduction='mean')
     if loss == "l2":
@@ -1019,7 +1029,7 @@ def main():
     settings = get_settings(args)
 
     if args.review_settings:
-        print_settings(settings, names=["model_scale", "depth", "width", "num_heads", "linear_value"])
+        print_settings(settings, names=["model_scale", "depth", "width", "num_heads", "linear_value", "top_k"])
         proceed = input("Proceed? [y/n] ")
         if proceed.lower() != "y":
             print("Aborting.")
@@ -1031,7 +1041,7 @@ def main():
     global hyp, model_scale
     change_gpu_token_capacity(args.gpu_capacity_scalar)
 
-    for setting_num, (model_scale, depth_small, width_small, num_heads, linear_value) in enumerate(settings):
+    for setting_num, (model_scale, depth_small, width_small, num_heads, linear_value, top_k) in enumerate(settings):
         seed = args.seed  # reset seed so that every setting goes through the same seeds over the different runs
 
         for run_num in range(args.num_runs):
@@ -1105,6 +1115,7 @@ def main():
                     seed=seed,
                     model=net,
                     loss_fn_name=loss_fn_name,
+                    top_k=top_k,
                 )
 
                 if del_net:
@@ -1120,6 +1131,7 @@ def main():
                 results = {
                     "last_val_loss": [last_val_loss],
                     "uid": [uid],
+                    "top_k": [top_k],
                     "model_scale": [model_scale],
                     "depth": [hyp['net']['num_blocks']],
                     "width": [hyp['net']['residual_depth']],
